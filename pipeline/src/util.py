@@ -1,4 +1,4 @@
-"""Shared helpers for CLI prompts and project paths."""
+"""Shared helpers."""
 
 from __future__ import annotations
 

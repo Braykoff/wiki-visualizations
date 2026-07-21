@@ -29,8 +29,44 @@ LISTING_SIZE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# repo root: wiki-visualizations/ (pipeline/src/download.py -> parents[2])
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def find_project_root() -> Path:
+    """Locate the wiki-visualizations repo root (parent of pipeline/).
+
+    Do not derive this from ``Path(__file__).parents[N]`` alone: when the
+    package is installed into the venv, ``__file__`` lives under site-packages.
+    """
+    starts: list[Path] = [Path.cwd().resolve(), Path(__file__).resolve()]
+
+    seen: set[Path] = set()
+    for start in starts:
+        for path in [start, *start.parents]:
+            if path in seen:
+                continue
+            seen.add(path)
+
+            # Installed into pipeline/.venv/.../site-packages/ → climb to repo root
+            if path.name == ".venv":
+                pipeline_dir = path.parent
+                if (pipeline_dir / "pyproject.toml").is_file():
+                    return pipeline_dir.parent
+
+            # Repo root contains pipeline/pyproject.toml
+            if (path / "pipeline" / "pyproject.toml").is_file():
+                return path
+
+            # Invoked from inside pipeline/
+            if path.name == "pipeline" and (path / "pyproject.toml").is_file():
+                return path.parent
+
+    raise RuntimeError(
+        "Could not locate project root. Run from the wiki-visualizations "
+        "repo (or its pipeline/ directory)."
+    )
+
+
+# Resolved at import time; safe because we can climb out of the venv path.
+PROJECT_ROOT = find_project_root()
 
 
 @dataclass(frozen=True)

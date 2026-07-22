@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import bz2
+import hashlib
+import math
 import multiprocessing as mp
 import os
 import queue as queue_module
@@ -46,7 +48,7 @@ ARCHIVES_DIR = PROJECT_ROOT / "data" / "archives"
 MODELS_DIR = PROJECT_ROOT / "data" / "models"
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 ARTICLE_NAMESPACE = "0"
 TOKEN_SAFETY_MARGIN = 16  # reserve room for model-added special tokens
 MAX_CHUNKS_PER_ARTICLE = 120  # caps pathological pages
@@ -64,6 +66,29 @@ class JobConfig:
     archive: Path
     model: Path
     database: Path
+    allocation: "WorkAllocation"
+
+
+@dataclass(frozen=True)
+class WorkAllocation:
+    """This machine's share of a deterministic, weighted shard assignment."""
+
+    weights: tuple[float, ...]
+    worker_index: int
+
+    @property
+    def worker_count(self) -> int:
+        return len(self.weights)
+
+    @property
+    def worker_number(self) -> int:
+        """One-based number used in prompts and filenames."""
+        return self.worker_index + 1
+
+    @property
+    def specification(self) -> str:
+        """Canonical weights string stored with the job metadata."""
+        return ",".join(f"{weight:g}" for weight in self.weights)
 
 
 @dataclass(frozen=True)
@@ -99,7 +124,9 @@ def open_connection(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def create_database(path: Path, archive: Path, model: Path) -> None:
+def create_database(
+    path: Path, archive: Path, model: Path, allocation: WorkAllocation
+) -> None:
     """Create schema and store job metadata for later resume/validation."""
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = open_connection(path)
@@ -137,6 +164,8 @@ def create_database(path: Path, archive: Path, model: Path) -> None:
                     ("archive_name", archive.name),
                     ("model_path", str(model)),
                     ("model_name", model.name),
+                    ("work_split_weights", allocation.specification),
+                    ("work_split_worker_index", str(allocation.worker_index)),
                     ("created_at", created_at),
                 ],
             )
@@ -489,12 +518,97 @@ def pick_directory(base: Path, question: str) -> Path:
     return path
 
 
+def parse_work_weights(value: str) -> tuple[float, ...]:
+    """Parse positive comma-separated relative compute shares."""
+    try:
+        weights = tuple(float(part.strip()) for part in value.split(","))
+    except ValueError as exc:
+        raise ValueError(
+            "Use comma-separated positive numbers, for example 70,30 or 40,30,30."
+        ) from exc
+    if not weights or any(not math.isfinite(weight) or weight <= 0 for weight in weights):
+        raise ValueError(
+            "Use at least one positive number, for example 100 or 70,30."
+        )
+    return weights
+
+
+def configure_work_allocation() -> WorkAllocation:
+    """Ask how the archive's shard work is divided across computers."""
+    while True:
+        raw_weights = prompt(
+            "Work shares across computers (comma-separated percentages or weights)",
+            default="100",
+        )
+        try:
+            weights = parse_work_weights(raw_weights)
+            break
+        except ValueError as exc:
+            print(f"{exc} Please try again.")
+
+    if len(weights) == 1:
+        return WorkAllocation(weights=weights, worker_index=0)
+
+    percentages = [weight / sum(weights) * 100 for weight in weights]
+    print(
+        "Workers: "
+        + ", ".join(
+            f"{index}: {share:.1f}%" for index, share in enumerate(percentages, start=1)
+        )
+    )
+    worker_number = int(
+        prompt(
+            "Which worker is this computer?",
+            default="1",
+            options=[str(index) for index in range(1, len(weights) + 1)],
+            allow_other=False,
+            allow_index=True,
+        )
+    )
+    return WorkAllocation(weights=weights, worker_index=worker_number - 1)
+
+
+def allocate_shards(
+    shards: list[Path], allocation: WorkAllocation
+) -> tuple[list[Path], ...]:
+    """Deterministically assign whole shards by size to weighted workers.
+
+    Largest shards are placed first onto the worker with the lowest
+    assigned-bytes-to-weight ratio. This avoids duplicate work while
+    approximating requested shares even when shard sizes differ.
+    """
+    assigned: list[list[Path]] = [[] for _ in allocation.weights]
+    assigned_bytes = [0] * allocation.worker_count
+    for shard in sorted(shards, key=lambda path: (-path.stat().st_size, path.name)):
+        worker = min(
+            range(allocation.worker_count),
+            key=lambda index: (assigned_bytes[index] / allocation.weights[index], index),
+        )
+        assigned[worker].append(shard)
+        assigned_bytes[worker] += shard.stat().st_size
+    return tuple(sorted(worker_shards) for worker_shards in assigned)
+
+
+def allocation_fingerprint(shards: list[Path]) -> str:
+    """Fingerprint the assigned shard names and sizes for resume validation."""
+    manifest = "\n".join(f"{shard.name}\t{shard.stat().st_size}" for shard in shards)
+    return hashlib.sha256(manifest.encode()).hexdigest()
+
+
 def configure_interactively() -> JobConfig:
     """Prompt for archive, model, and output database; create/validate the DB."""
     archive = pick_directory(ARCHIVES_DIR, "Which wiki archive?")
     model = pick_directory(MODELS_DIR, "Which embedding model?")
+    allocation = configure_work_allocation()
 
-    default_db = PROCESSED_DIR / f"embeddings-{archive.name}-{model.name}.sqlite"
+    suffix = (
+        ""
+        if allocation.worker_count == 1
+        else f"-worker-{allocation.worker_number}-of-{allocation.worker_count}"
+    )
+    default_db = (
+        PROCESSED_DIR / f"embeddings-{archive.name}-{model.name}{suffix}.sqlite"
+    )
     database = Path(
         prompt("Output database", default=str(default_db), validate_path=True)
     )
@@ -508,12 +622,28 @@ def configure_interactively() -> JobConfig:
                 f"archive={meta['archive_path']} model={meta['model_path']}; "
                 "choose a different output file or matching inputs."
             )
+        stored_weights = meta.get("work_split_weights")
+        stored_index = meta.get("work_split_worker_index")
+        if (
+            stored_weights is not None
+            and (
+                stored_weights != allocation.specification
+                or stored_index != str(allocation.worker_index)
+            )
+        ):
+            raise RuntimeError(
+                f"Existing database {database} belongs to worker "
+                f"{int(stored_index or 0) + 1} of split {stored_weights}; "
+                "choose its matching allocation or a different output file."
+            )
         print(f"Resuming existing database: {database}")
     else:
-        create_database(database, archive, model)
+        create_database(database, archive, model, allocation)
         print(f"Created database: {database}")
 
-    return JobConfig(archive=archive, model=model, database=database)
+    return JobConfig(
+        archive=archive, model=model, database=database, allocation=allocation
+    )
 
 
 def load_job(database: Path) -> JobConfig:
@@ -530,10 +660,23 @@ def load_job(database: Path) -> JobConfig:
     if not model.is_dir():
         raise RuntimeError(f"Model directory from metadata not found: {model}")
 
+    allocation = WorkAllocation(
+        weights=parse_work_weights(meta.get("work_split_weights", "100")),
+        worker_index=int(meta.get("work_split_worker_index", "0")),
+    )
+    if not 0 <= allocation.worker_index < allocation.worker_count:
+        raise RuntimeError(f"Invalid work-allocation metadata in {database}")
+
     print(f"Loaded job from {database}")
     print(f"  archive: {archive}")
     print(f"  model:   {model}")
-    return JobConfig(archive=archive, model=model, database=database)
+    print(
+        f"  worker:  {allocation.worker_number} of {allocation.worker_count} "
+        f"(shares: {allocation.specification})"
+    )
+    return JobConfig(
+        archive=archive, model=model, database=database, allocation=allocation
+    )
 
 
 # --------------------------------------------------------------------------
@@ -567,9 +710,18 @@ def update_postfix(bar: tqdm, articles_written: int, last_title: str) -> None:
 
 def run_job(config: JobConfig) -> None:
     """Parse shards in worker processes, embed and store in the main process."""
-    shards = sorted(config.archive.glob("*.xml.bz2"))
-    if not shards:
+    all_shards = sorted(config.archive.glob("*.xml.bz2"))
+    if not all_shards:
         raise RuntimeError(f"No .xml.bz2 shards found in {config.archive}")
+    assigned_shards = allocate_shards(all_shards, config.allocation)[
+        config.allocation.worker_index
+    ]
+    if not assigned_shards:
+        raise RuntimeError(
+            f"Worker {config.allocation.worker_number} has no assigned shards. "
+            "Use fewer workers for this archive."
+        )
+    assigned_fingerprint = allocation_fingerprint(assigned_shards)
 
     conn = open_connection(config.database)
     try:
@@ -589,6 +741,7 @@ def run_job(config: JobConfig) -> None:
             "embedding_dim": str(dim),
             "max_content_tokens": str(settings.max_tokens),
             "document_prefix": settings.document_prefix,
+            "assigned_shards_sha256": assigned_fingerprint,
         }
         existing_rows = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
         incompatible = {
@@ -615,7 +768,7 @@ def run_job(config: JobConfig) -> None:
             )
             conn.executemany(
                 "INSERT OR IGNORE INTO shard_progress (shard) VALUES (?)",
-                [(shard.name,) for shard in shards],
+                [(shard.name,) for shard in assigned_shards],
             )
 
         # Work out what is left to do.
@@ -625,17 +778,27 @@ def run_job(config: JobConfig) -> None:
                 "SELECT shard, completed, last_page_id FROM shard_progress"
             )
         }
-        pending = [s for s in shards if not progress[s.name][0]]
+        pending = [s for s in assigned_shards if not progress[s.name][0]]
         if not pending:
             total_rows = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-            print(f"All {len(shards)} shard(s) already completed ({total_rows} articles).")
+            print(
+                f"All {len(assigned_shards)} assigned shard(s) already completed "
+                f"({total_rows} articles)."
+            )
             return
 
         cpu_count = os.process_cpu_count() or os.cpu_count() or 1
         workers = max(1, min(len(pending), cpu_count - 2))
         print(f"Hardware concurrency: {cpu_count} CPUs")
         print(f"Parser processes:     {workers} (1 per shard, main process encodes/writes)")
-        print(f"Shards: {len(pending)} pending of {len(shards)} total")
+        assigned_bytes = sum(shard.stat().st_size for shard in assigned_shards)
+        total_bytes_all = sum(shard.stat().st_size for shard in all_shards)
+        print(
+            f"Assigned work:        worker {config.allocation.worker_number} of "
+            f"{config.allocation.worker_count}, {len(assigned_shards)} shard(s), "
+            f"{assigned_bytes / total_bytes_all:.1%} of archive bytes"
+        )
+        print(f"Shards: {len(pending)} pending of {len(assigned_shards)} assigned")
 
         ctx = mp.get_context("spawn")
         out_queue: mp.Queue = ctx.Queue(maxsize=QUEUE_MAX_MESSAGES)

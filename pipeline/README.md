@@ -75,3 +75,23 @@ uv run embeddings ../data/processed/embeddings-enwiki-2026-07-01-BAAI--bge-base-
 ```
 
 This reads the archive and model from the database metadata and continues from the last committed article in each shard.
+
+### Sharing an embedding run across computers
+
+Each computer must use its own output database; do not place one SQLite database
+on a shared drive and have multiple computers write to it. During interactive
+setup, enter comma-separated relative compute shares, then select this
+computer's worker number:
+
+```text
+Work shares across computers (comma-separated percentages or weights) [100]: 70,30
+Which worker is this computer? [1]: 1
+```
+
+Run the second computer with the same `70,30` shares and select worker `2`.
+For a 40% / 30% / 30% split, each computer uses `40,30,30` and selects its
+own worker number. The script assigns whole XML shards deterministically by
+compressed size, balancing them toward the requested shares without duplicate
+work. Worker databases default to names such as
+`embeddings-<archive>-<model>-worker-1-of-2.sqlite`; keep them separate until
+the results are merged or consumed together by a later processing step.

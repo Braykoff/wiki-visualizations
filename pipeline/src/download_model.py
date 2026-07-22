@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sentence_transformers import SentenceTransformer
 
-from util import find_project_root, prompt_path
+from util import find_project_root, prompt_choice, prompt_path
 
 PROJECT_ROOT = find_project_root()
 
@@ -54,21 +54,13 @@ def print_model_options() -> None:
 def select_model() -> str:
     """Ask which model to download: blank, list number, or arbitrary model id."""
     print_model_options()
-    default_label = f"1 ({DEFAULT_MODEL})"
-    while True:
-        raw = input(f"Which model do you want to download? [{default_label}]: ").strip()
-        if raw == "":
-            return DEFAULT_MODEL
-        if raw.isdigit():
-            index = int(raw)
-            if 1 <= index <= len(MODEL_OPTIONS):
-                return MODEL_OPTIONS[index - 1][0]
-            print(
-                f"Invalid number: {index}. "
-                f"Choose 1-{len(MODEL_OPTIONS)}, or enter a model id."
-            )
-            continue
-        return raw
+    return prompt_choice(
+        "Which model do you want to download?",
+        default=DEFAULT_MODEL,
+        options=[name for name, _ in MODEL_OPTIONS],
+        allow_index=True,
+        allow_other=True,
+    )
 
 
 def model_directory_name(model_id: str) -> str:

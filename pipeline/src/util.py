@@ -2,19 +2,91 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 
-def prompt_choice(prompt: str, default: str, valid: set[str] | None = None) -> str:
-    """Ask until blank (use default) or a valid value is entered."""
+def prompt_choice(
+    prompt: str,
+    default: str | None = None,
+    options: Sequence[str] | None = None,
+    *,
+    allow_other: bool = True,
+    show_options: bool = False,
+    allow_index: bool = False,
+) -> str:
+    """Ask until the user enters a valid value.
+
+    Modes (combinable where sensible):
+      - Open-ended: ``options=None`` accepts any non-blank input.
+      - Constrained: ``options`` set; invalid values re-prompt unless ``allow_other``.
+      - Indexed: ``allow_index=True`` lets the user pick ``1..N`` from ``options``.
+      - Listed: ``show_options=True`` prints ``options`` before prompting.
+
+    ``allow_other=False`` requires ``options``. ``show_options=True`` and
+    ``allow_index=True`` also require ``options``. When ``options`` is given,
+    order is preserved for display and indexing.
+    """
+    if not allow_other and options is None:
+        raise ValueError("allow_other=False requires options")
+    if show_options and options is None:
+        raise ValueError("show_options=True requires options")
+    if allow_index and options is None:
+        raise ValueError("allow_index=True requires options")
+
+    option_set = set(options) if options is not None else None
+
+    if show_options:
+        print("Available options:")
+        if allow_index:
+            for index, option in enumerate(options, start=1):
+                marker = " (default)" if option == default else ""
+                print(f"  {index}. {option}{marker}")
+        else:
+            for option in options:
+                marker = " (default)" if option == default else ""
+                print(f"  - {option}{marker}")
+
+    if default is not None and allow_index and options and default == options[0]:
+        default_hint = f"1 ({default})"
+    elif default is not None:
+        default_hint = default
+    else:
+        default_hint = None
+
     while True:
-        raw = input(f"{prompt} [{default}]: ").strip()
-        value = default if raw == "" else raw
-        if valid is not None and value not in valid:
-            options = ", ".join(sorted(valid))
-            print(f"Invalid input: {value!r}. Available options: {options}")
+        if default_hint is not None:
+            raw = input(f"{prompt} [{default_hint}]: ").strip()
+        else:
+            raw = input(f"{prompt}: ").strip()
+
+        if raw == "":
+            if default is not None:
+                return default
+            print("Input required.")
             continue
-        return value
+
+        if allow_index and raw.isdigit() and options is not None:
+            index = int(raw)
+            if 1 <= index <= len(options):
+                return options[index - 1]
+            if allow_other:
+                print(
+                    f"Invalid number: {index}. "
+                    f"Choose 1-{len(options)}, or enter another value."
+                )
+            else:
+                print(f"Invalid number: {index}. Choose 1-{len(options)}.")
+            continue
+
+        if option_set is not None and raw not in option_set:
+            if allow_other:
+                return raw
+            listed = ", ".join(options) if options is not None else ""
+            print(f"Invalid input: {raw!r}. Available options: {listed}")
+            continue
+
+        return raw
 
 
 def prompt_path(prompt: str, default: Path) -> Path:

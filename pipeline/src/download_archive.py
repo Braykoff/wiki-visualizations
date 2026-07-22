@@ -340,7 +340,12 @@ def select_archive() -> str:
         raise RuntimeError("Default archive 'enwiki' was not found in the listing.")
 
     print(f"Found {len(archives)} archives (default: enwiki).")
-    return prompt_choice("Which archive do you want to download?", "enwiki", set(archives))
+    return prompt_choice(
+        "Which archive do you want to download?",
+        default="enwiki",
+        options=archives,
+        allow_other=False,
+    )
 
 
 def select_date(archive: str) -> str:
@@ -357,7 +362,12 @@ def select_date(archive: str) -> str:
     for date in dates:
         marker = " (most recent)" if date == default else ""
         print(f"  - {date}{marker}")
-    return prompt_choice("Which dump date?", default, set(dates))
+    return prompt_choice(
+        "Which dump date?",
+        default=default,
+        options=dates,
+        allow_other=False,
+    )
 
 
 def configure_interactively() -> DownloadConfig:

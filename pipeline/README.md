@@ -50,3 +50,28 @@ You will be prompted for:
 2. **Target directory** (default: `../data/models/<model-name>`): Where to download the model to. This directory must be empty.
 
 After downloading the model, it will be loaded and a test sentence will be embedded to verify the download was successful.
+
+## Processing
+
+### Generating embeddings
+
+Once an archive and a model are downloaded, generate article embeddings with:
+
+```bash
+uv run embeddings
+```
+
+You will be prompted for:
+1. **Wiki archive** (default: first directory in `../data/archives/`): The downloaded archive to process.
+2. **Embedding model** (default: first directory in `../data/models/`): The downloaded model to embed with.
+3. **Output database** (default: `../data/processed/embeddings-<archive>-<model>.sqlite`): A SQLite file containing the job metadata, per-shard progress, and an `embeddings` table with `page_id`, `rev_id`, `title`, `url`, and `embedding` (float32 blob) columns.
+
+Articles are parsed from the archive shards by worker processes (sized from hardware concurrency) while the main process encodes batches on the best available device (CUDA/MPS/CPU) and writes them to the database. Each batch commits transactionally, so interrupting the run loses at most one batch. Article chunks are sized from the selected model's tokenizer and context limit, not a fixed character count. Nomic Embed Text uses its documented `search_document:` prefix for every document chunk and automatically uses smaller encode batches for its longer inputs.
+
+To resume an interrupted job, pass the database path:
+
+```bash
+uv run embeddings ../data/processed/embeddings-enwiki-2026-07-01-BAAI--bge-base-en-v1.5.sqlite
+```
+
+This reads the archive and model from the database metadata and continues from the last committed article in each shard.

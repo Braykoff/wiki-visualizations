@@ -2,9 +2,9 @@
 """CLI to download Wikimedia mediawiki_content_current dumps.
 
 Two ways to run:
-  uv run download
+  uv run download-archive
       Interactive prompts; writes wikiviz-download-info.txt into the target dir.
-  uv run download /path/to/target
+  uv run download-archive /path/to/target
       Reads wikiviz-download-info.txt from that directory and resumes/reuses options.
 """
 
@@ -254,7 +254,7 @@ def write_download_info(config: DownloadConfig) -> Path:
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [
         "# wiki-visualizations download options",
-        "# Re-run with: uv run download <this-directory>",
+        "# Re-run with: uv run download-archive <this-directory>",
         f"archive={config.archive}",
         f"dump_date={config.dump_date}",
         f"dump_url={config.dump_url}",
@@ -366,7 +366,7 @@ def configure_interactively() -> DownloadConfig:
     dump_date = select_date(archive)
     dump_url = build_dump_url(archive, dump_date)
 
-    default_target = PROJECT_ROOT / "data" / "downloads" / f"{archive}-{dump_date}"
+    default_target = PROJECT_ROOT / "data" / "archives" / f"{archive}-{dump_date}"
     target = prompt_path("Target directory", default_target)
     ensure_directory(target)
 

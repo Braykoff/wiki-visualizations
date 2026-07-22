@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sentence_transformers import SentenceTransformer
 
-from util import find_project_root, prompt_choice, prompt_path
+from util import find_project_root, prompt
 
 PROJECT_ROOT = find_project_root()
 
@@ -54,7 +54,7 @@ def print_model_options() -> None:
 def select_model() -> str:
     """Ask which model to download: blank, list number, or arbitrary model id."""
     print_model_options()
-    return prompt_choice(
+    return prompt(
         "Which model do you want to download?",
         default=DEFAULT_MODEL,
         options=[name for name, _ in MODEL_OPTIONS],
@@ -88,7 +88,13 @@ def ensure_empty_directory(path: Path) -> None:
 def select_target(model_id: str) -> Path:
     """Ask where to save the model; default is data/models/<model-name>."""
     default_target = default_model_target(model_id)
-    return prompt_path("Target directory", default_target)
+    return Path(
+        prompt(
+            "Target directory",
+            default=str(default_target),
+            validate_path=True,
+        )
+    )
 
 
 def format_duration(seconds: float) -> str:

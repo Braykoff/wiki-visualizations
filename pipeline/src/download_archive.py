@@ -25,7 +25,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from util import find_project_root, prompt_choice, prompt_path
+from util import find_project_root, prompt
 
 BASE_URL = "https://dumps.wikimedia.org/other/mediawiki_content_current"
 USER_AGENT = "wiki-visualizations-pipeline/1.0"
@@ -340,7 +340,7 @@ def select_archive() -> str:
         raise RuntimeError("Default archive 'enwiki' was not found in the listing.")
 
     print(f"Found {len(archives)} archives (default: enwiki).")
-    return prompt_choice(
+    return prompt(
         "Which archive do you want to download?",
         default="enwiki",
         options=archives,
@@ -362,7 +362,7 @@ def select_date(archive: str) -> str:
     for date in dates:
         marker = " (most recent)" if date == default else ""
         print(f"  - {date}{marker}")
-    return prompt_choice(
+    return prompt(
         "Which dump date?",
         default=default,
         options=dates,
@@ -377,7 +377,13 @@ def configure_interactively() -> DownloadConfig:
     dump_url = build_dump_url(archive, dump_date)
 
     default_target = PROJECT_ROOT / "data" / "archives" / f"{archive}-{dump_date}"
-    target = prompt_path("Target directory", default_target)
+    target = Path(
+        prompt(
+            "Target directory",
+            default=str(default_target),
+            validate_path=True,
+        )
+    )
     ensure_directory(target)
 
     config = DownloadConfig(
